@@ -1,36 +1,63 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# CLAUDE//RELAY
 
-## Getting Started
+A local proxy + dashboard that lets your Claude Code sessions switch between
+multiple Claude accounts with one click — no `/login`, no restarting sessions.
 
-First, run the development server:
+## How it works
+
+Your sessions talk to this app instead of `api.anthropic.com`
+(`ANTHROPIC_BASE_URL=http://localhost:4141`). The relay strips whatever auth
+Claude Code sends and injects the OAuth token of whichever account is
+**active** in the dashboard. Switching accounts changes the token for the very
+next request, so every session — including ones already running — flips
+instantly.
+
+It also keeps each account's token fresh (rotating refresh tokens are
+persisted), and can **auto-failover**: when the live account gets a 429, the
+relay marks it limited, switches to the other account, and transparently
+retries the request.
+
+## Alternative models (CLIProxyAPI)
+
+Requests whose `model` is **not** `claude-*` (e.g. `gpt-5.6-sol`, `gemini-*`,
+`grok-*`) are forwarded to a local [CLIProxyAPI](https://127.0.0.1:8317)
+instance instead of Anthropic. It exposes an Anthropic-compatible
+`/v1/messages` endpoint and serves those models through OAuth'd
+GPT/Gemini/etc subscriptions. Configure it with:
+
+- `CLIPROXY_BASE_URL` — gateway origin (default `http://127.0.0.1:8317`).
+- `CLIPROXY_API_KEY` — sent as `x-api-key` when set (put it in `.env.local`).
+
+Claude models are untouched: they still go to Anthropic with account
+switching, 429 failover, and usage tracking. The gateway path skips all of
+that — no account, OAuth token, failover, or usage tracking.
+
+## Setup
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+npm run start   # serves dashboard + proxy on http://localhost:4141
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+1. Open http://localhost:4141 and click **import current login** — this reads
+   the account Claude Code is signed into (macOS Keychain, falling back to
+   `~/.claude/.credentials.json`).
+2. In any terminal: `claude` → `/logout` → `/login` with your second account,
+   then import again. (You can `/login` back to your preferred one after —
+   the relay keeps its own copies.)
+3. Point sessions at the relay — in `~/.claude/settings.json`:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+   ```json
+   { "env": { "ANTHROPIC_BASE_URL": "http://localhost:4141" } }
+   ```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+   Sessions started after this change go through the relay; switch accounts
+   from the dashboard anytime.
 
-## Learn More
+## Notes
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- Tokens live in `data/accounts.json` (gitignored, plaintext — local use only).
+- The relay binds to localhost via Next's default; don't expose it.
+- If the relay is down, sessions pointed at it fail — remove the env override
+  or restart the app.
+- Re-importing an account (matched by email) updates it in place.
