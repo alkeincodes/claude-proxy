@@ -34,10 +34,28 @@ that — no account, OAuth token, failover, or usage tracking.
 
 ## Setup
 
+**Prerequisites:** Node.js 24+ and Claude Code installed and signed in.
+
 ```bash
+git clone git@github.com:alkeincodes/claude-proxy.git
+cd claude-proxy
 npm install
+npm run build
 npm run start   # serves dashboard + proxy on http://localhost:4141
 ```
+
+> Use `npm run dev` instead of `build`/`start` for hot-reload while hacking on the relay.
+
+**Optional — alternative models.** Only needed if you want to route non-Claude
+models (`gpt-*`, `gemini-*`, `grok-*`) through a local CLIProxyAPI. Create
+`.env.local`:
+
+```bash
+CLIPROXY_BASE_URL=http://127.0.0.1:8317
+CLIPROXY_API_KEY=your-cliproxy-key   # sent as x-api-key when set
+```
+
+Then:
 
 1. Open http://localhost:4141 and click **import current login** — this reads
    the account Claude Code is signed into (macOS Keychain, falling back to
