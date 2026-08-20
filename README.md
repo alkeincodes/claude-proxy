@@ -75,7 +75,12 @@ Then:
 ## Notes
 
 - Tokens live in `data/accounts.json` (gitignored, plaintext — local use only).
-- The relay binds to localhost via Next's default; don't expose it.
+- **The dashboard and its `/api/*` routes have no authentication.** Anyone
+  who can reach port 4141 can list accounts, switch the active one, import
+  credentials, and read the activity log (which shows account names and
+  emails). The relay binds to localhost via Next's default. Keep it there:
+  don't bind it to `0.0.0.0`, put it behind a tunnel, or run it on a shared
+  box without adding auth in front of it first.
 - If the relay is down, sessions pointed at it fail — remove the env override
   or restart the app.
 - Re-importing an account (matched by email) updates it in place.

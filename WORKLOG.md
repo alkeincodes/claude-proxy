@@ -148,7 +148,9 @@ PRs, the cheapest guaranteed fix was to delete and recreate it (private) and
 re-push. `5379bc8` now 404s; all four commit SHAs are unchanged. Deleting
 needed a one-time `gh auth refresh -s delete_repo`.
 
-**Decision: this stays an internal app**, so the missing auth on the dashboard
-and `/api/*` routes is accepted rather than fixed. Note that the activity log
+**Decision: the repo is public** (shared with the team), but the app itself is
+localhost-only, so the missing auth on the dashboard and `/api/*` routes is
+accepted rather than fixed. README now spells that constraint out for anyone
+who clones it. Note that the activity log
 served to the dashboard contains account names and emails, so if this is ever
 exposed beyond localhost that becomes a real leak, not a theoretical one.
