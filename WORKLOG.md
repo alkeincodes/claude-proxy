@@ -126,3 +126,29 @@ account** (`lib/oauth.ts` rewritten around a `LocalSnapshot`):
   (`app/[...path]/route.ts`) — a refresh failure surfaces as 502 and does not
   fail over. Left as-is (the root cause is fixed); revisit if a *second*
   account ever needs to cover a token failure.
+
+## 2026-08-21 — Pre-publication credential audit + repo recreation
+
+Audited the repo for committed secrets ahead of a possible public release.
+Result: **no credentials were ever committed.** Verified by extracting all 23
+secret-length strings from `.env.local`, `data/accounts.json` and
+`data/last-429.json`, then grepping every blob in every commit for each one.
+Zero token hits. `/data` and `.env*` are correctly gitignored and never
+appeared in the history at all. A pattern sweep (`sk-`, `sk-ant-`, `ghp_`,
+`github_pat_`, `AKIA`, PEM, JWT, `Bearer`) matched only the truncated
+placeholder in `app/page.tsx`.
+
+One real finding: a colleague's work email appeared twice in the 08-05 entry
+above. Redacted to `"Secondary"` and amended out of the tip commit.
+
+**Why the repo's creation date changed:** force-pushing unlinks a commit but
+does not garbage-collect it, and GitHub kept serving the pre-redaction SHA
+`5379bc8` by direct API lookup. Since the repo had no stars, forks, issues or
+PRs, the cheapest guaranteed fix was to delete and recreate it (private) and
+re-push. `5379bc8` now 404s; all four commit SHAs are unchanged. Deleting
+needed a one-time `gh auth refresh -s delete_repo`.
+
+**Decision: this stays an internal app**, so the missing auth on the dashboard
+and `/api/*` routes is accepted rather than fixed. Note that the activity log
+served to the dashboard contains account names and emails, so if this is ever
+exposed beyond localhost that becomes a real leak, not a theoretical one.
