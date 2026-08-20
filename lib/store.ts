@@ -32,6 +32,13 @@ export interface Account {
   rateLimitedUntil: number | null;
   /** true when rateLimitedUntil is a guess, not from Anthropic headers */
   rateLimitEstimated?: boolean;
+  /**
+   * True when this account is the one Claude Code itself is logged in as on
+   * this machine. Anthropic rotates refresh tokens on every use, so the local
+   * credential store (Keychain / ~/.claude/.credentials.json) — not our own
+   * copy — is the source of truth for these. See lib/oauth.ts.
+   */
+  localKeychain?: boolean;
   /** live usage from anthropic-ratelimit-unified-* response headers */
   usage?: AccountUsage | null;
 }

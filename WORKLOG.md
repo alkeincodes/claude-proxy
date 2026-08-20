@@ -61,3 +61,68 @@ gpt-5.6-sol → 200 ("E2E GPT OK"); claude path (`GET :4141/v1/models`) still
 - GET `/v1/models` has no body, so it always goes to Anthropic (not the
   gateway). Claude Code tolerates its `--model` not appearing there; revisit
   with a merged model list if that ever changes.
+
+## 2026-08-05 — Fix `invalid_grant` refresh-token rotation race (complete)
+
+**Symptom:** every ~8h the relay 502'd with `token refresh failed: 400
+{"error":"invalid_grant","error_description":"Refresh token not found or
+invalid"}`, retrying ~10× and only recovering after a manual re-import.
+
+**Root cause:** Anthropic rotates the refresh token on every use, and the proxy
+kept a *private copy* of credentials shared with the Claude Code install on this
+machine. Claude Code refreshes directly against `console.anthropic.com` — that
+traffic never passes through the proxy — so whichever side refreshed second got
+`invalid_grant`. The in-flight de-dupe `Map` in `lib/oauth.ts` only guarded
+concurrent refreshes *within* the proxy process; it could not see Claude Code.
+
+**Why it started 08-04:** the log shows `switch "Secondary" → "Primary"`
+at 20:08:05 and the first failure 30s later. `Secondary` is not this
+machine's login (sole owner of its refresh token → no contention). `Primary`
+*is*, which created the shared-credential race. Failures then recurred at each
+8h access-token boundary (`REFRESH_MARGIN` fires 5 min early).
+
+**Fix — local credential store becomes the source of truth for the linked
+account** (`lib/oauth.ts` rewritten around a `LocalSnapshot`):
+- `Account.localKeychain` marks the account Claude Code is logged in as. Set on
+  import from `source: "local"`; also backfilled lazily by token match.
+- On refresh for a linked account: read the Keychain first and **adopt** a newer
+  token instead of refreshing (the common case — zero network calls).
+- If a refresh is still needed, use the *Keychain's* refresh token, not our copy.
+- After a successful refresh, **write the rotation back** to the Keychain (or
+  `~/.claude/.credentials.json`), preserving every sibling key (`mcpOAuth`,
+  `rateLimitTier`, `refreshTokenExpiresAt`, …) so Claude Code's own login keeps
+  working. Write failure is surfaced in the activity log, not swallowed.
+- On `invalid_grant` we re-read and retry once (`RefreshError.invalidGrant`),
+  so a lost race self-heals instead of storming the log.
+- Access tokens stay valid after rotation, so the Keychain is only consulted on
+  the refresh path — the hot path is unchanged.
+
+**Verified:**
+- Offline reproduction (stale store + fresh Keychain): pre-fix code emitted the
+  exact production error; post-fix adopts the Keychain token with **0 network
+  calls**. Test restores the store afterwards.
+- Keychain write-back exercised against a throwaway service: tokens updated,
+  all sibling keys preserved, `-U` updates in place (no duplicate item).
+- `npx tsc --noEmit` clean; `next build` clean (run on an isolated copy — see
+  note below).
+- End-to-end through the relay: `POST /v1/messages` → "RELAY OK",
+  `GET /v1/models` → 200.
+
+### Operational notes
+- **The relay runs `next dev` (pid varies), not `next start`** — despite the
+  2026-07-06 entry. HMR picks changes up live. Running `next build` in the
+  project dir overwrites the `.next` the dev server is serving from and can
+  drop in-flight requests, so production builds were verified on an rsync'd
+  copy in a scratch dir (Turbopack rejects a symlinked `node_modules` — it must
+  be a real copy; APFS `cp -Rc` makes that cheap).
+- Smoke-testing with plain `curl` gives a misleading **429 `rate_limit_error`
+  with no `anthropic-ratelimit-unified-*` headers** — an OAuth token used
+  without Claude Code's identity fails that way even at 15% quota. Include
+  `anthropic-beta: oauth-2025-04-20,claude-code-20250219`, a `claude-cli`
+  user-agent, and the Claude Code system prompt. Such a 429 briefly writes a
+  bogus `"hit its limit"` log line; it self-clears on the next real request via
+  the `unified-status: allowed` path.
+- `autoFailover` is currently **off**, and failover only triggers on 429
+  (`app/[...path]/route.ts`) — a refresh failure surfaces as 502 and does not
+  fail over. Left as-is (the root cause is fixed); revisit if a *second*
+  account ever needs to cover a token failure.

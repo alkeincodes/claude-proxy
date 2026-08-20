@@ -39,6 +39,9 @@ export async function POST(req: Request) {
   }
 
   const email = await fetchProfileEmail(creds.accessToken);
+  // Credentials read off this machine stay shared with Claude Code, which
+  // rotates the refresh token behind our back. lib/oauth.ts needs to know.
+  const localKeychain = body.source !== "paste";
 
   const result = await mutateStore((store) => {
     // Same underlying account already saved? Update it in place instead of
@@ -50,6 +53,11 @@ export async function POST(req: Request) {
         a.accessToken === creds.accessToken,
     );
     if (existing) {
+      if (localKeychain) {
+        for (const account of store.accounts) {
+          account.localKeychain = account.id === existing.id;
+        }
+      }
       existing.accessToken = creds.accessToken;
       existing.refreshToken = creds.refreshToken;
       existing.expiresAt = creds.expiresAt;
@@ -61,6 +69,9 @@ export async function POST(req: Request) {
       return { account: existing, updated: true };
     }
 
+    if (localKeychain) {
+      for (const account of store.accounts) account.localKeychain = false;
+    }
     const account = {
       id: newAccountId(),
       name: body.name?.trim() || email || `Account ${store.accounts.length + 1}`,
@@ -74,6 +85,7 @@ export async function POST(req: Request) {
       lastUsedAt: null,
       requestCount: 0,
       rateLimitedUntil: null,
+      localKeychain,
     };
     store.accounts.push(account);
     if (!store.activeAccountId) store.activeAccountId = account.id;

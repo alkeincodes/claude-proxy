@@ -1,7 +1,7 @@
 import { promises as fs } from "fs";
 import path from "path";
 import { NextRequest } from "next/server";
-import { ensureFreshToken } from "@/lib/oauth";
+import { ensureFreshToken, refreshRejectedToken } from "@/lib/oauth";
 import {
   Account,
   activeAccount,
@@ -204,8 +204,11 @@ async function attempt(
   target: string,
   account: Account,
   body: ArrayBuffer | undefined,
+  recoverRejectedToken = false,
 ): Promise<Response> {
-  const token = await ensureFreshToken(account);
+  const token = recoverRejectedToken
+    ? await refreshRejectedToken(account)
+    : await ensureFreshToken(account);
   return fetch(target, {
     method: req.method,
     headers: upstreamHeaders(req, token),
@@ -255,6 +258,19 @@ async function proxy(
       { error: { type: "proxy_error", message: `claude-proxy: upstream request failed: ${String(err)}` } },
       { status: 502 },
     );
+  }
+
+  // A fresh-looking token may have been revoked by a new `claude /login`.
+  // Re-sync with the local Keychain (or refresh pasted credentials) and replay
+  // the request once, so re-login heals existing relay sessions immediately.
+  if (res.status === 401) {
+    try {
+      const retried = await attempt(req, target, active, body, true);
+      void res.body?.cancel();
+      res = retried;
+    } catch {
+      // Preserve Anthropic's original 401 if credential recovery itself fails.
+    }
   }
 
   if (res.status === 429) {
