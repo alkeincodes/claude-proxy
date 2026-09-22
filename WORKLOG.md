@@ -229,3 +229,45 @@ token until it actually expires (Claude Code refreshes 5 minutes earlier), and
 only refresh after taking `.oauth_refresh.lock` itself. Never prefer
 `.credentials.json` over the relay's own token, and heal a tombstone when the
 relay holds a valid one. Bind to 127.0.0.1.
+
+## 2026-09-23 Fix shipped for the logouts
+
+`lib/oauth.ts` now follows Claude Code's credential protocol instead of racing it:
+- For the account Claude Code is logged in as, the relay adopts from the
+  Keychain and does not refresh until the token's last minute. Claude Code
+  refreshes at 5 minutes, so in practice the relay never refreshes it.
+- If the relay does refresh, it first takes `~/.claude/.oauth_refresh.lock` and
+  the legacy `~/.claude.lock` with Claude Code's exact proper-lockfile options,
+  then re-reads inside the lock.
+- Saves go under `~/.claude/.storage-write`, re-read the blob at write time,
+  and compare-and-swap on the refresh token, so a concurrent `/login` or MCP
+  token save is never clobbered.
+- A tombstoned Keychain is a real answer: the relay refreshes with its own
+  token and heals the Keychain. `.credentials.json` is only read when the
+  Keychain item does not exist, matching Claude Code.
+- 401 recovery never adopts expired credentials.
+- Sends `scope`, uses `platform.claude.com`, keeps `refresh_token_expires_in`
+  and the granted scopes.
+- `security` gets a 5s timeout, and secrets go over stdin up to 4032 bytes.
+  Past that, `security -i` fails (measured: a 3.2 KB line works, 6.2 KB exits
+  1), so larger blobs go on argv exactly as Claude Code does.
+
+Also:
+- Bound the relay to `::1`. Claude Code and Chrome connect over IPv6, so
+  `127.0.0.1` would have cut every session off. The LAN address now refuses
+  connections.
+- Moved the stale `~/.claude/.credentials.json` to
+  `.credentials.json.stale-2026-08-13` (dead since 09-11). Not deleted.
+- `npm test` runs `test/oauth.test.mts` against a fake `security`, a temp HOME
+  and a stubbed token endpoint. The harness refuses to run unless the fake is
+  first on PATH, because the relay writes the real Keychain service name.
+
+**Verified live:** swapped at 04:56:35, before the 04:56:55 refresh window.
+Claude Code refreshed at 04:56:57 and the relay adopted it with zero refreshes
+of its own; relay and Keychain in sync, not tombstoned. After the restart onto
+`::1`: 16 of 16 requests returned 200, and `192.168.68.110:4141` refused.
+
+**Watch for:** any `Login expired` from here on. Under this protocol one
+should only appear when the refresh-token family expires, next around 10-20.
+If one shows up sooner, the relay's activity log now records each adopt and
+refresh, and a relay refresh outside the last minute would be a bug.
