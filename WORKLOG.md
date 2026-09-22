@@ -154,3 +154,78 @@ accepted rather than fixed. README now spells that constraint out for anyone
 who clones it. Note that the activity log
 served to the dashboard contains account names and emails, so if this is ever
 exposed beyond localhost that becomes a real leak, not a theoretical one.
+
+## 2026-09-23 Root cause of the repeated Claude Code logouts (investigated, not yet fixed)
+
+**Symptom:** `Login expired · Please run /login` and `Not logged in · Please run
+/login`, 5 to 13 times a week since at least 08-06, with about 30 successful
+`/login`s between 08-18 and 09-22. The 08-05 fix above did not stop it.
+
+**How Claude Code 2.1.280 manages the token** (read from the embedded source
+in the binary, not docs):
+- Refreshes are serialized by `~/.claude/.oauth_refresh.lock` (proper-lockfile,
+  stale 60s). Every storage write is a read-modify-write under a second lock,
+  `~/.claude/.storage-write`, and saves are compare-and-swap.
+- It re-reads the Keychain before the lock, inside it, and again after a
+  failure. Two Claude Code processes cannot collide.
+- On `invalid_grant` it tombstones the Keychain item: accessToken and
+  refreshToken become `""`, expiresAt `0`. It only does this when the stored
+  refresh token is still the one that failed. Every process sharing the item
+  then shows "Login expired".
+- It refreshes 5 minutes before expiresAt, and posts `scope` every time.
+
+Under that protocol a tombstone should only happen when the refresh-token
+family genuinely expires (about 4 weeks here). This machine sees it weekly.
+
+**Root cause:** the relay is a second refresher of the same token that ignores
+that protocol. On this machine it is the only one: orca and hermes-agent are
+not running, CLIProxyAPI holds only a Codex login, and there is one Keychain
+item with no `CLAUDE_CONFIG_DIR` overrides. Specifically, `lib/oauth.ts`:
+1. takes neither lock, so Claude Code's serialization does not cover it;
+2. uses the same 5-minute margin on the same expiresAt, so both sides decide
+   to refresh in the same window by design;
+3. writes the whole blob back from a snapshot taken before its POST, outside
+   `.storage-write`, which can clobber a concurrent Claude Code write;
+4. passes the credentials on argv (`security ... -w <json>`) with no timeout.
+
+When the relay has already POSTed `RT_n` and has not written `RT_n+1` back
+yet, a Claude Code refresh posts `RT_n`, gets `invalid_grant`, still sees
+`RT_n` stored, and tombstones the item.
+
+**Why it then stays broken for hours:** a tombstoned Keychain fails the
+relay's `toSnapshot` validation, so `readLocalSnapshot` falls back to
+`~/.claude/.credentials.json`. On this machine that file is from 08-13, and its
+refresh-token family expired 09-11. The relay trusts it over its own store.
+Offline repro against the real `lib/oauth.ts` (fake `security` on PATH, temp
+HOME, stubbed fetch, relay holding the only valid token):
+- `ensureFreshToken` POSTs the file's dead token, fails, and never tries its own;
+- `refreshRejectedToken` (the 401 path) overwrites the relay's valid tokens
+  with the dead file credentials;
+- neither path writes the Keychain, so the tombstone is never healed.
+This matches 09-08: Claude Code "Login expired" at 00:04, then the relay failing
+with `invalid_grant` at 00:05 and every hour until the `/login` at 20:55.
+
+**Not pinned down:**
+- Which exact interleaving started each incident. Claude Code keeps no debug
+  logs here, and the relay's 80-entry log is full of 429 noise.
+- `Not logged in` (no token, no tombstone). From the code it is either a
+  Keychain read that fails with no cached copy, or a 401 body mentioning
+  "x-api-key". The login keychain never auto-locks, so it is not that.
+
+**Also found:**
+- The relay listens on every interface: `next dev` logs
+  `Network: http://192.168.68.110:4141`. The no-auth dashboard, and the proxy
+  itself (inference on this subscription), are reachable from the LAN. The
+  README's localhost claim is wrong.
+- 13,473 `EADDRINUSE` failed starts in `~/Library/Logs/claude-proxy/stderr.log`:
+  launchd kept retrying while a manual `npm run dev` held the port. It is
+  launchd-owned and stable now.
+- The relay refreshes against `console.anthropic.com` without `scope`, while
+  Claude Code uses `platform.claude.com` with scope.
+
+**Fix direction (not implemented):** make the relay a reader, not a refresher,
+for the linked account. Adopt from the Keychain, keep using the current access
+token until it actually expires (Claude Code refreshes 5 minutes earlier), and
+only refresh after taking `.oauth_refresh.lock` itself. Never prefer
+`.credentials.json` over the relay's own token, and heal a tombstone when the
+relay holds a valid one. Bind to 127.0.0.1.
